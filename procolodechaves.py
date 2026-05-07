@@ -5,11 +5,11 @@ import sqlite3
 import io
 
 # --- CONFIGURAÇÃO DO BANCO DE DADOS ---
+# Mantendo o banco v2 para consistência com a estrutura de atendente
 conn = sqlite3.connect('protocolo_chaves_v2.db', check_same_thread=False)
 c = conn.cursor()
 
 def init_db():
-    # Tabela de Chaves (Inventário)
     c.execute('''CREATE TABLE IF NOT EXISTS chaves 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   codigo_chave TEXT UNIQUE, 
@@ -17,7 +17,6 @@ def init_db():
                   status TEXT DEFAULT 'Disponível', 
                   usuario_atual TEXT)''')
     
-    # Tabela de Log com Atendente (Rastreabilidade)
     c.execute('''CREATE TABLE IF NOT EXISTS historico_chaves 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   chave_id TEXT, 
@@ -26,7 +25,6 @@ def init_db():
                   data_hora TIMESTAMP,
                   atendente TEXT)''')
     
-    # Tabela de Usuários (Sistema)
     c.execute('CREATE TABLE IF NOT EXISTS usuarios (username TEXT PRIMARY KEY, password TEXT)')
     c.execute("INSERT OR IGNORE INTO usuarios (username, password) VALUES ('Admin', '12345')")
     conn.commit()
@@ -38,13 +36,12 @@ st.set_page_config(page_title="Protocolo de Chaves FASICLIN", layout="wide")
 
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
-if 'user_logged' not in st.session_state:
-    st.session_state['user_logged'] = ""
 
-# --- BARRA LATERAL (LOGIN) ---
-st.sidebar.title('🔐 Acesso Restrito')
+# --- BARRA LATERAL ---
+st.sidebar.title('🔐 Área Administrativa')
 if not st.session_state['logged_in']:
     with st.sidebar:
+        st.write("Acesso restrito para relatórios e gestão.")
         u_input = st.text_input('Usuário')
         p_input = st.text_input('Senha', type='password')
         if st.button('Entrar'):
@@ -56,78 +53,68 @@ if not st.session_state['logged_in']:
             else:
                 st.error('Credenciais inválidas')
 else:
-    nome_u = st.session_state.get('user_logged', 'Usuário')
-    st.sidebar.success(f"Logado: {nome_u}")
-    
-    opcoes = ["Movimentação de Chaves"]
-    if nome_u == 'Admin':
-        opcoes.extend(["Relatório de Uso", "Gerenciar Inventário", "Gestão de Usuários"])
-    
-    aba = st.sidebar.radio("Navegação", opcoes)
-    
+    st.sidebar.success(f"Logado: {st.session_state['user_logged']}")
+    menu_admin = st.sidebar.radio("Gestão Avançada", ["Relatório de Uso", "Gerenciar Inventário", "Gestão de Usuários"])
     if st.sidebar.button('Sair'):
         st.session_state['logged_in'] = False
         st.rerun()
 
-# --- FLUXO DE TELAS ---
+# --- CORPO PRINCIPAL ---
+
+# Se NÃO estiver logado ou se estiver logado mas NÃO selecionou uma aba de gestão,
+# mostra a tela de Movimentação (Pública e Rápida)
 if not st.session_state['logged_in']:
     st.title("🔑 FASICLIN - Protocolo de Chaves")
-    st.info("Por favor, realize o login na barra lateral para operar o sistema.")
-    st.image("https://fasiclin.heon.com.br/dashboard/logo.png", width=200) # Exemplo de logo
+    st.subheader("🔄 Retirada e Devolução Rápida")
+    
+    df_c = pd.read_sql("SELECT * FROM chaves", conn)
+    
+    if df_c.empty:
+        st.info("Nenhuma chave cadastrada. O Admin precisa cadastrar as salas no menu lateral.")
+    else:
+        # Interface de seleção simplificada
+        lista = df_c.apply(lambda x: f"{x['codigo_chave']} - {x['nome_sala']} ({x['status']})", axis=1).tolist()
+        selecao = st.selectbox("Selecione a Sala/Chave:", lista)
+        cod = selecao.split(" - ")[0]
+        info = df_c[df_c['codigo_chave'] == cod].iloc[0]
 
-else:
-    # 1. MOVIMENTAÇÃO (TÉCNICOS E ADMIN)
-    if aba == "Movimentação de Chaves":
-        st.title("🔄 Retirada e Devolução")
-        df_c = pd.read_sql("SELECT * FROM chaves", conn)
-        
-        if df_c.empty:
-            st.warning("Nenhuma chave cadastrada no inventário.")
+        st.divider()
+
+        if info['status'] == 'Disponível':
+            st.subheader("📝 Formulário de Retirada")
+            with st.form("retirada_publica", clear_on_submit=True):
+                pessoa = st.text_input("Nome do Professor / Responsável:")
+                confirmar = st.form_submit_button("Confirmar Retirada")
+                
+                if confirmar:
+                    if pessoa:
+                        agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # Como é público, o atendente fica como 'Auto-serviço' ou 'Balcão'
+                        c.execute("UPDATE chaves SET status='Emprestada', usuario_atual=? WHERE codigo_chave=?", (pessoa, cod))
+                        c.execute("INSERT INTO historico_chaves (chave_id, usuario_pessoa, acao, data_hora, atendente) VALUES (?,?,?,?,?)",
+                                  (cod, pessoa, 'Retirada', agora, 'Balcão/Público'))
+                        conn.commit()
+                        st.success(f"Retirada registrada! Chave {cod} está com {pessoa}.")
+                        st.balloons()
+                        # Aguarda um pouco e recarrega
+                        st.rerun()
+                    else:
+                        st.warning("Por favor, digite seu nome para continuar.")
         else:
-            col_sel, col_status = st.columns([2, 1])
-            with col_sel:
-                lista = df_c.apply(lambda x: f"{x['codigo_chave']} - {x['nome_sala']}", axis=1).tolist()
-                selecao = st.selectbox("Selecione a Chave:", lista)
-                cod = selecao.split(" - ")[0]
-                info = df_c[df_c['codigo_chave'] == cod].iloc[0]
+            st.warning(f"Atenção: Esta chave está com **{info['usuario_atual']}**")
+            if st.button(f"Registrar Devolução da Chave {cod}"):
+                agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                usuario_que_tinha = info['usuario_atual']
+                c.execute("UPDATE chaves SET status='Disponível', usuario_atual=NULL WHERE codigo_chave=?", (cod,))
+                c.execute("INSERT INTO historico_chaves (chave_id, usuario_pessoa, acao, data_hora, atendente) VALUES (?,?,?,?,?)",
+                          (cod, usuario_que_tinha, 'Devolução', agora, 'Balcão/Público'))
+                conn.commit()
+                st.success(f"Devolução da chave {cod} realizada com sucesso!")
+                st.rerun()
 
-            with col_status:
-                st.metric("Status Atual", info['status'])
-
-            st.divider()
-
-            if info['status'] == 'Disponível':
-                st.subheader("📝 Registrar Retirada")
-                with st.form("retirada"):
-                    pessoa = st.text_input("Nome do Responsável (Professor/Aluno/Técnico):")
-                    if st.form_submit_button("Confirmar Saída"):
-                        if pessoa:
-                            agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            atendente = st.session_state['user_logged']
-                            # Atualiza Chave
-                            c.execute("UPDATE chaves SET status='Emprestada', usuario_atual=? WHERE codigo_chave=?", (pessoa, cod))
-                            # Log Histórico[cite: 2]
-                            c.execute("INSERT INTO historico_chaves (chave_id, usuario_pessoa, acao, data_hora, atendente) VALUES (?,?,?,?,?)",
-                                      (cod, pessoa, 'Retirada', agora, atendente))
-                            conn.commit()
-                            st.success(f"Chave {cod} entregue a {pessoa}")
-                            st.rerun()
-            else:
-                st.warning(f"Chave em posse de: **{info['usuario_atual']}**")
-                if st.button(f"Confirmar Devolução de {cod}"):
-                    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    atendente = st.session_state['user_logged']
-                    pessoa_devolveu = info['usuario_atual']
-                    # Atualiza Chave[cite: 2]
-                    c.execute("UPDATE chaves SET status='Disponível', usuario_atual=NULL WHERE codigo_chave=?", (cod,))
-                    # Log Histórico[cite: 2]
-                    c.execute("INSERT INTO historico_chaves (chave_id, usuario_pessoa, acao, data_hora, atendente) VALUES (?,?,?,?,?)",
-                              (cod, pessoa_devolveu, 'Devolução', agora, atendente))
-                    conn.commit()
-                    st.rerun()
-
-    # 2. RELATÓRIOS (ADMIN)
-    elif aba == "Relatório de Uso":
+# --- TELAS RESTRITAS (APARECEM QUANDO LOGADO) ---
+else:
+    if menu_admin == "Relatório de Uso":
         st.title("📊 Histórico de Movimentações")
         df_h = pd.read_sql("SELECT * FROM historico_chaves ORDER BY data_hora DESC", conn)
         st.dataframe(df_h, use_container_width=True)
@@ -135,40 +122,29 @@ else:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_h.to_excel(writer, index=False)
-        st.download_button("📥 Exportar Histórico para Excel", output.getvalue(), "historico_chaves.xlsx")
+        st.download_button("📥 Baixar Excel", output.getvalue(), "historico_chaves.xlsx")
 
-    # 3. GERENCIAR INVENTÁRIO (ADMIN)
-    elif aba == "Gerenciar Inventário":
+    elif menu_admin == "Gerenciar Inventário":
         st.title("🛠️ Cadastro de Chaves")
-        with st.form("cad_chave"):
-            c_cod = st.text_input("Código da Chave (Ex: CH-101)")
-            c_sala = st.text_input("Nome da Sala/Laboratório")
-            if st.form_submit_button("Cadastrar Chave"):
-                try:
-                    c.execute("INSERT INTO chaves (codigo_chave, nome_sala) VALUES (?,?)", (c_cod, c_sala))
-                    conn.commit()
-                    st.success("Chave cadastrada!")
-                except: st.error("Este código já existe.")
-
-        st.subheader("Chaves Ativas")
-        df_resumo = pd.read_sql("SELECT * FROM chaves", conn)
-        for _, r in df_resumo.iterrows():
-            c1, c2, c3 = st.columns([2, 2, 1])
-            c1.write(f"**{r['codigo_chave']}**")
-            c2.write(r['nome_sala'])
-            if c3.button("Remover", key=f"del_{r['codigo_chave']}"):
-                c.execute("DELETE FROM chaves WHERE codigo_chave=?", (r['codigo_chave'],))
+        with st.form("cad"):
+            c1, c2 = st.columns(2)
+            cod_n = c1.text_input("Cód. Chave")
+            sala_n = c2.text_input("Nome da Sala")
+            if st.form_submit_button("Cadastrar"):
+                c.execute("INSERT INTO chaves (codigo_chave, nome_sala) VALUES (?,?)", (cod_n, sala_n))
                 conn.commit()
                 st.rerun()
 
-    # 4. GESTÃO DE USUÁRIOS (ADMIN)
-    elif aba == "Gestão de Usuários":
-        st.title("👥 Técnicos do Sistema")
-        # Reaproveitando a lógica de cadastro de técnicos que já funciona bem
-        with st.form("cad_user"):
-            nu = st.text_input("Novo Usuário")
-            np = st.text_input("Senha", type='password')
-            if st.form_submit_button("Criar Acesso"):
-                c.execute("INSERT OR IGNORE INTO usuarios VALUES (?,?)", (nu, np))
+        st.subheader("Lista de Chaves")
+        df_inv = pd.read_sql("SELECT * FROM chaves", conn)
+        st.table(df_inv[['codigo_chave', 'nome_sala', 'status']])
+
+    elif menu_admin == "Gestão de Usuários":
+        st.title("👥 Técnicos/Administradores")
+        with st.form("user"):
+            u = st.text_input("Login")
+            p = st.text_input("Senha", type='password')
+            if st.form_submit_button("Criar Usuário"):
+                c.execute("INSERT OR IGNORE INTO usuarios VALUES (?,?)", (u, p))
                 conn.commit()
                 st.rerun()
